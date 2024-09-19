@@ -1,6 +1,8 @@
-# original author: signatrix
-# adapted from https://github.com/signatrix/efficientdet/blob/master/train.py
-# modified by Zylo117
+# train.py
+# Original author: signatrix
+# Adapted from https://github.com/signatrix/efficientdet/blob/master/train.py
+# Modified by Zylo117
+# Updated to save the best model based on validation loss
 
 import argparse
 import datetime
@@ -42,10 +44,10 @@ def get_args():
                              'useful in early stage convergence or small/easy dataset')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--optim', type=str, default='adamw', help='select optimizer for training, '
-                                                                   'suggest using \'admaw\' until the'
+                                                                   'suggest using \'adamw\' until the'
                                                                    ' very final stage then switch to \'sgd\'')
     parser.add_argument('--num_epochs', type=int, default=500)
-    parser.add_argument('--val_interval', type=int, default=1, help='Number of epoches between valing phases')
+    parser.add_argument('--val_interval', type=int, default=1, help='Number of epochs between validation phases')
     parser.add_argument('--save_interval', type=int, default=500, help='Number of steps between saving')
     parser.add_argument('--es_min_delta', type=float, default=0.0,
                         help='Early stopping\'s parameter: minimum change loss to qualify as an improvement')
@@ -124,7 +126,7 @@ def train(opt):
     model = EfficientDetBackbone(num_classes=len(params.obj_list), compound_coef=opt.compound_coef,
                                  ratios=eval(params.anchors_ratios), scales=eval(params.anchors_scales))
 
-    # load last weights
+    # Load last weights
     if opt.load_weights is not None:
         if opt.load_weights.endswith('.pth'):
             weights_path = opt.load_weights
@@ -140,7 +142,7 @@ def train(opt):
         except RuntimeError as e:
             print(f'[Warning] Ignoring {e}')
             print(
-                '[Warning] Don\'t panic if you see this, this might be because you load a pretrained weights with different number of classes. The rest of the weights should be loaded already.')
+                '[Warning] Don\'t panic if you see this, this might be because you load pretrained weights with different number of classes. The rest of the weights should be loaded already.')
 
         print(f'[Info] loaded weights: {os.path.basename(weights_path)}, resuming checkpoint from step: {last_step}')
     else:
@@ -148,7 +150,7 @@ def train(opt):
         print('[Info] initializing weights...')
         init_weights(model)
 
-    # freeze backbone if train head_only
+    # Freeze backbone if train head_only
     if opt.head_only:
         def freeze_backbone(m):
             classname = m.__class__.__name__
@@ -160,13 +162,7 @@ def train(opt):
         model.apply(freeze_backbone)
         print('[Info] freezed backbone')
 
-    # https://github.com/vacancy/Synchronized-BatchNorm-PyTorch
-    # apply sync_bn when using multiple gpu and batch_size per gpu is lower than 4
-    #  useful when gpu memory is limited.
-    # because when bn is disable, the training will be very unstable or slow to converge,
-    # apply sync_bn can solve it,
-    # by packing all mini-batch across all gpus as one batch and normalize, then send it back to all gpus.
-    # but it would also slow down the training by a little bit.
+    # Apply sync_bn if necessary
     if params.num_gpus > 1 and opt.batch_size // params.num_gpus < 4:
         model.apply(replace_w_sync_bn)
         use_sync_bn = True
@@ -175,7 +171,7 @@ def train(opt):
 
     writer = SummaryWriter(opt.log_path + f'/{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}/')
 
-    # warp the model with loss function, to reduce the memory usage on gpu0 and speedup
+    # Wrap the model with loss function
     model = ModelWithLoss(model, debug=opt.debug)
 
     if params.num_gpus > 0:
@@ -217,8 +213,6 @@ def train(opt):
                     annot = data['annot']
 
                     if params.num_gpus == 1:
-                        # if only one gpu, just send it to cuda:0
-                        # elif multiple gpus, send it to multiple gpus in CustomDataParallel, not here
                         imgs = imgs.cuda()
                         annot = annot.cuda()
 
@@ -232,7 +226,6 @@ def train(opt):
                         continue
 
                     loss.backward()
-                    # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
                     optimizer.step()
 
                     epoch_loss.append(float(loss))
@@ -245,15 +238,17 @@ def train(opt):
                     writer.add_scalars('Regression_loss', {'train': reg_loss}, step)
                     writer.add_scalars('Classfication_loss', {'train': cls_loss}, step)
 
-                    # log learning_rate
+                    # Log learning rate
                     current_lr = optimizer.param_groups[0]['lr']
                     writer.add_scalar('learning_rate', current_lr, step)
 
                     step += 1
 
-                    if step % opt.save_interval == 0 and step > 0:
-                        save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
-                        print('checkpoint...')
+                    # Optionally save checkpoint every save_interval steps
+                    # Uncomment the following lines if you want to save checkpoints periodically
+                    # if step % opt.save_interval == 0 and step > 0:
+                    #     save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
+                    #     print('Checkpoint saved at step {}'.format(step))
 
                 except Exception as e:
                     print('[Error]', traceback.format_exc())
@@ -296,17 +291,19 @@ def train(opt):
                 writer.add_scalars('Regression_loss', {'val': reg_loss}, step)
                 writer.add_scalars('Classfication_loss', {'val': cls_loss}, step)
 
+                # Save the best model based on validation loss
                 if loss + opt.es_min_delta < best_loss:
                     best_loss = loss
                     best_epoch = epoch
 
-                    save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
+                    save_checkpoint(model, 'best_model.pth')
+                    print(f'New best model saved at epoch {epoch} with loss {best_loss:.5f}')
 
                 model.train()
 
                 # Early stopping
                 if epoch - best_epoch > opt.es_patience > 0:
-                    print('[Info] Stop training at epoch {}. The lowest loss achieved is {}'.format(epoch, best_loss))
+                    print('[Info] Stop training at epoch {}. The lowest loss achieved is {:.5f}'.format(epoch, best_loss))
                     break
     except KeyboardInterrupt:
         save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
